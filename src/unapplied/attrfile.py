@@ -15,9 +15,11 @@ from pathlib import Path
 # begin with a dash or a digit. attr.c, attr_name_valid().
 _NAME = re.compile(r"\A[A-Za-z_.][-A-Za-z0-9_.]*\Z")
 
-#: Attributes git itself acts on. Everything else is for other tools to read,
-#: which is why an unrecognised attribute is never reported as a problem.
-GIT_ATTRIBUTES = frozenset(
+#: Attributes git looks up per file, because they are about file content.
+#: Setting one of these on a pattern that only ever matches a directory does
+#: nothing: git asks for a directory's attributes only while walking a tree,
+#: and never asks about its content.
+PER_FILE_ATTRIBUTES = frozenset(
     {
         "text",
         "eol",
@@ -28,12 +30,17 @@ GIT_ATTRIBUTES = frozenset(
         "merge",
         "conflict-marker-size",
         "whitespace",
-        "export-ignore",
         "export-subst",
         "delta",
         "encoding",
     }
 )
+
+#: The one git attribute a directory pattern is the normal way to write.
+#: `git archive` looks up export-ignore on tree entries and drops the whole
+#: subtree, so `/Tests export-ignore` and even `Tests/ export-ignore` work
+#: despite matching no file -- verified against git 2.55.
+DIRECTORY_ATTRIBUTES = frozenset({"export-ignore"})
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,8 @@ class Assignment:
 
     name: str
     value: str  # "set", "unset", "unspecified", or the literal value
+    #: the macro this came out of, when it was not written on the line
+    via: str | None = None
 
     @property
     def is_driver_ref(self) -> bool:
@@ -50,6 +59,55 @@ class Assignment:
             "unset",
             "unspecified",
         )
+
+    def describe(self) -> str:
+        if self.via:
+            return f"{self.name} (via the {self.via} macro)"
+        return self.name
+
+
+#: Macros git defines itself. `binary` both sets `binary` and expands, which
+#: is why a repository full of `*.png binary` resolves to text being unset
+#: rather than to whatever `* text=auto` said.
+BUILTIN_MACROS: dict[str, tuple[Assignment, ...]] = {
+    "binary": (
+        Assignment("diff", "unset"),
+        Assignment("merge", "unset"),
+        Assignment("text", "unset"),
+    ),
+}
+
+
+def expand(assignments: list[Assignment], macros: dict[str, tuple[Assignment, ...]]) -> list[Assignment]:
+    """Resolve macros to the attributes git will actually apply.
+
+    Verified against git 2.55:
+
+    * a macro sets its own name *and* applies its attributes
+      (`*.png binary` gives `binary: set` plus `-diff -merge -text`)
+    * a negated macro sets the name and does *not* expand
+      (`-binary` leaves `text=auto` from an earlier line alone)
+    * a macro may be used above the line that defines it
+    * a macro may expand to another macro
+    """
+    out: list[Assignment] = []
+
+    def walk(assignment: Assignment, seen: frozenset[str], via: str | None) -> None:
+        out.append(
+            Assignment(assignment.name, assignment.value, via)
+            if via
+            else assignment
+        )
+        if assignment.value != "set" or assignment.name not in macros:
+            return
+        if assignment.name in seen:
+            return  # a macro defined in terms of itself; git ignores the loop
+        for inner in macros[assignment.name]:
+            walk(inner, seen | {assignment.name}, via or assignment.name)
+
+    for assignment in assignments:
+        walk(assignment, frozenset(), None)
+    return out
 
 
 @dataclass
@@ -67,6 +125,9 @@ class AttrLine:
     rank: int = 0
     probe: str = ""  # sentinel attribute name used to ask git what this matches
     matched: list[str] = field(default_factory=list)
+    #: tracked directories the pattern matches, which is a different question:
+    #: only export-ignore survives on a pattern that matches no file
+    matched_dirs: list[str] = field(default_factory=list)
 
     @property
     def location(self) -> str:
@@ -79,7 +140,8 @@ class AttrFile:
     base: str
     rank: int
     lines: list[AttrLine]
-    macros: list[str]  # names defined by [attr] lines in this file
+    #: names defined by [attr] lines in this file, mapped to their attributes
+    macros: dict[str, tuple[Assignment, ...]]
     unparsed: list[tuple[int, str, str]]  # lineno, raw, why
 
 
@@ -114,7 +176,7 @@ def _split_tokens(line: str) -> list[str] | None:
 
 def parse(text: str, source: str, base: str, rank: int) -> AttrFile:
     lines: list[AttrLine] = []
-    macros: list[str] = []
+    macros: dict[str, tuple[Assignment, ...]] = {}
     unparsed: list[tuple[int, str, str]] = []
 
     for lineno, raw in enumerate(text.splitlines(), start=1):
@@ -133,8 +195,12 @@ def parse(text: str, source: str, base: str, rank: int) -> AttrFile:
 
         if pattern.startswith("[attr]"):
             name = pattern[len("[attr]") :]
-            if name:
-                macros.append(name)
+            if name and base == "":
+                # Only the toplevel file and info/attributes may define
+                # macros. Elsewhere git rejects the line by name and line
+                # number, which is louder than anything this tool would say.
+                defined = [a for a in (_parse_assignment(t) for t in rest) if a]
+                macros[name] = tuple(defined)
             continue
 
         assignments: list[Assignment] = []

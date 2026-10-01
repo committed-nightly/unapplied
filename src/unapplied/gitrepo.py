@@ -113,16 +113,20 @@ class Repo:
             if not entry:
                 continue
             fields, _, path = entry.partition("\t")
-            parts = fields.split()
-            index_eol = worktree_eol = attr = ""
+            # The attr field runs to the tab and can contain spaces -- git
+            # prints `attr/text eol=crlf` as one field -- so it cannot be
+            # recovered by splitting on whitespace.
+            head, sep, attr = fields.partition("attr/")
+            parts = head.split()
+            index_eol = worktree_eol = ""
             for part in parts:
                 if part.startswith("i/"):
                     index_eol = part[2:]
                 elif part.startswith("w/"):
                     worktree_eol = part[2:]
-                elif part.startswith("attr/"):
-                    attr = part[5:]
-            records.append(EolRecord(path.strip(), index_eol, worktree_eol, attr))
+            records.append(
+                EolRecord(path, index_eol, worktree_eol, attr.strip() if sep else "")
+            )
         return records
 
     def blob_head(self, path: str, size_limit: int = 512) -> bytes | None:

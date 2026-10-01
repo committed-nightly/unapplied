@@ -46,15 +46,97 @@ def test_pattern_matching_no_tracked_file(repo):
     assert "'*.rb'" in found[0].message
 
 
-def test_trailing_slash_gets_the_specific_hint(repo):
+def test_a_directory_pattern_is_not_never_matches(repo):
+    """It matches the directory, which is a real thing for export-ignore."""
+    repo.write("vendor/dep.c", "x\n")
+    repo.write(".gitattributes", "vendor/ export-ignore\nTests export-ignore\n")
+    repo.write("Tests/t.c", "x\n")
+    repo.commit()
+
+    assert analyse(repo.path) == []
+
+
+def test_export_ignore_on_a_directory_really_works(repo):
+    """The reason the above is not a finding, asserted against git archive."""
+    repo.write("vendor/dep.c", "x\n")
+    repo.write("keep.c", "x\n")
+    repo.write(".gitattributes", "vendor/ export-ignore\n")
+    repo.commit()
+
+    archive = repo.git("archive", "HEAD", "--format=tar")
+    assert "keep.c" in archive
+    assert "vendor/dep.c" not in archive, (
+        "git archive stopped honouring export-ignore on a trailing-slash "
+        "directory pattern, so such a line is dead after all"
+    )
+
+
+# --- directory-only ----------------------------------------------------------
+
+
+def test_per_file_attribute_on_a_directory_pattern(repo):
     repo.write("vendor/dep.c", "x\n")
     repo.write(".gitattributes", "vendor/ -text\n")
     repo.commit()
 
-    found = analyse(repo.path, {"never-matches"})
+    found = analyse(repo.path, {"directory-only"})
     assert len(found) == 1
-    assert "trailing slash" in found[0].message
+    assert "text" in found[0].message
     assert "vendor/**" in found[0].message
+    assert "1 directory" in found[0].message
+
+
+def test_directory_pattern_with_only_export_ignore_is_clean(repo):
+    repo.write("Tests/t.c", "x\n")
+    repo.write(".gitattributes", "/Tests export-ignore\n")
+    repo.commit()
+
+    assert analyse(repo.path, {"directory-only"}) == []
+
+
+def test_directory_pattern_mixing_both_reports_only_the_dead_half(repo):
+    repo.write("Tests/t.c", "x\n")
+    repo.write(".gitattributes", "/Tests export-ignore -text\n")
+    repo.commit()
+
+    found = analyse(repo.path, {"directory-only"})
+    assert len(found) == 1
+    assert "text" in found[0].message
+    assert "export-ignore" not in found[0].message
+
+
+def test_unknown_attribute_on_a_directory_is_not_reported(repo):
+    """A third-party tool may well ask about directories; git's opinion on
+    linguist-vendored is not a reason to call the line dead."""
+    repo.write("vendor/dep.c", "x\n")
+    repo.write(".gitattributes", "vendor/ linguist-vendored\n")
+    repo.commit()
+
+    assert analyse(repo.path, {"directory-only"}) == []
+
+
+def test_pattern_matching_both_files_and_directories_is_clean(repo):
+    """One match on a real file is enough; the rule is doing something."""
+    repo.write("thing.c", "x\n")
+    repo.write("things/inner.c", "x\n")
+    repo.write(".gitattributes", "thing* -text\n")
+    repo.commit()
+
+    found = analyse(repo.path, {"directory-only"})
+    assert found == [], "a pattern matching thing.c was called directory-only"
+
+
+def test_a_pattern_matching_only_a_directory_by_accident(repo):
+    """`src*` does not match src/a.c: no slash in the pattern means it is
+    matched against the basename, and `*` does not cross a slash. So it
+    catches the directory and nothing else."""
+    repo.write("src/a.c", "x\n")
+    repo.write(".gitattributes", "src* -text\n")
+    repo.commit()
+
+    found = analyse(repo.path, {"directory-only"})
+    assert len(found) == 1
+    assert "matched: src" in found[0].detail
 
 
 def test_untracked_file_does_not_rescue_a_pattern(repo):
@@ -267,12 +349,55 @@ def test_renormalized_repository_is_clean(repo):
     assert analyse(repo.path, {"unnormalized"}) == []
 
 
-def test_file_meant_to_be_crlf_is_not_reported(repo):
+def test_eol_crlf_still_wants_lf_in_the_index(repo):
+    """`eol=crlf` converts on checkout; the blob is still meant to be LF.
+
+    Asserted against git first, because the obvious reading of `eol=crlf` is
+    that a CRLF blob is what it asked for, and that reading is wrong.
+    """
     repo.write("script.bat", b"echo\r\n")
     repo.commit()
     repo.write(".gitattributes", "*.bat text eol=crlf\n")
     repo.commit_only("attrs", ".gitattributes")
 
+    found = analyse(repo.path, {"unnormalized"})
+    assert len(found) == 1, (
+        "git stores LF in the index under eol=crlf, so a CRLF blob is a finding"
+    )
+
+    repo.git("add", "--renormalize", ".")
+    repo.git("commit", "-q", "-m", "renormalize")
+    assert "i/lf" in repo.git("ls-files", "--eol", "--", "script.bat")
+    assert analyse(repo.path, {"unnormalized"}) == []
+
+
+def test_minus_text_file_is_not_reported(repo):
+    """`-text` is the one case where a CRLF blob is correct."""
+    repo.write("fixture.txt", b"a\r\nb\r\n")
+    repo.commit()
+    repo.write(".gitattributes", "* text=auto eol=lf\nfixture.txt -text\n")
+    repo.commit_only("attrs", ".gitattributes")
+
+    assert analyse(repo.path, {"unnormalized"}) == []
+
+
+def test_inert_eol_next_to_minus_text_is_not_reported(repo):
+    """The godot false positive: -text wins, and the eol beside it does nothing.
+
+    `* text=auto eol=lf` plus a later `-text` resolves to `text: unset` with
+    `eol: lf` still showing in check-attr. Reading the eol winner alone makes
+    this look unnormalised; git does no conversion at all.
+    """
+    repo.write("tests/line_endings_crlf.txt", b"a\r\nb\r\n")
+    repo.commit()
+    repo.write(
+        ".gitattributes",
+        "* text=auto eol=lf\n*_crlf.txt -text\n",
+    )
+    repo.commit_only("attrs", ".gitattributes")
+
+    repo_obj = Repo(repo.path.resolve())
+    assert "-text" in repo_obj.ls_files_eol()[-1].attr
     assert analyse(repo.path, {"unnormalized"}) == []
 
 
@@ -389,3 +514,20 @@ def test_quoted_pattern_that_matches_nothing_is_still_reported(repo):
     found = analyse(repo.path, {"never-matches"})
     assert len(found) == 1
     assert "no such file.txt" in found[0].message
+
+
+def test_the_lfs_track_boilerplate_is_not_reported(repo):
+    """`git lfs track` writes diff=lfs and merge=lfs, which git-lfs never
+    defines. True, universal, and not worth telling anyone about."""
+    repo.write("f.sqlite", "x\n")
+    repo.write(".gitattributes", "*.sqlite filter=lfs diff=lfs merge=lfs -text\n")
+    repo.commit()
+
+    files = attrfile.discover(repo.path, repo.path / ".git", {".gitattributes"}, None)
+    found = checks.check_drivers(files, config_keys={"filter.lfs.clean"})
+    assert found == []
+
+    # filter=lfs is still reported when LFS itself is not configured.
+    found = checks.check_drivers(files, config_keys=set())
+    assert [f.check for f in found] == ["undefined-driver"]
+    assert "git lfs install" in found[0].message

@@ -29,12 +29,28 @@ class ProbeFailed(Exception):
     pass
 
 
+def directories_of(paths: list[str]) -> list[str]:
+    """Every directory implied by a list of tracked files.
+
+    Both spellings, because they are not the same question to git: a pattern
+    written `vendor/` matches only when the queried path carries the slash,
+    which is how `git archive` asks about a tree entry, while `vendor` matches
+    the bare form. A pattern is only dead if neither spelling matches.
+    """
+    dirs = set()
+    for path in paths:
+        parts = path.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            dirs.add("/".join(parts[:i]))
+    return sorted(dirs) + sorted(d + "/" for d in dirs)
+
+
 def resolve_matches(
     files: list[AttrFile],
     paths: list[str],
     ignorecase: bool = False,
 ) -> None:
-    """Fill in `probe` and `matched` on every line of every file, in place."""
+    """Fill in `probe`, `matched` and `matched_dirs` on every line, in place."""
     lines = [line for f in files for line in f.lines]
     if not lines:
         return
@@ -42,18 +58,25 @@ def resolve_matches(
     for index, line in enumerate(lines):
         line.probe = f"up{index}"
         line.matched = []
+        line.matched_dirs = []
 
+    dirs = directories_of(paths)
     with tempfile.TemporaryDirectory(prefix="unapplied-probe-") as tmp:
         probe_root = Path(tmp)
         _build_probe(probe_root, files, ignorecase)
-        attrs = _check_attr_all(probe_root, paths)
+        attrs = _check_attr_all(probe_root, paths + dirs)
 
     by_probe = {line.probe: line for line in lines}
-    for path in paths:
+    file_set = set(paths)
+    for path in paths + dirs:
         for name, value in attrs.get(path, {}).items():
             line = by_probe.get(name)
-            if line is not None and value != "unspecified":
+            if line is None or value == "unspecified":
+                continue
+            if path in file_set:
                 line.matched.append(path)
+            else:
+                line.matched_dirs.append(path)
 
 
 def _build_probe(root: Path, files: list[AttrFile], ignorecase: bool) -> None:

@@ -18,8 +18,8 @@ import pytest
 from unapplied.drivers import BUILTIN_DIFF
 
 
-def test_trailing_slash_pattern_matches_nothing(repo):
-    """The claim behind the hint on a `vendor/` pattern."""
+def test_trailing_slash_pattern_matches_no_file(repo):
+    """The claim behind directory-only."""
     repo.write("vendor/thing.c", "x\n")
     repo.write(".gitattributes", "vendor/ marked\nvendor/** alsomarked\n")
     repo.commit()
@@ -27,9 +27,55 @@ def test_trailing_slash_pattern_matches_nothing(repo):
     out = repo.git("check-attr", "--all", "vendor/thing.c")
     assert "alsomarked" in out, "sanity: vendor/** should match"
     assert "marked: set" not in out.replace("alsomarked: set", ""), (
-        "git applied a trailing-slash gitattributes pattern; the never-matches "
-        "hint telling people to use vendor/** is now wrong"
+        "git applied a trailing-slash pattern to a file inside the directory, "
+        "so directory-only is now wrong"
     )
+
+
+def test_a_directory_pattern_does_match_the_directory(repo):
+    """The claim behind never-matches no longer firing on `/Tests`.
+
+    Both spellings matter: a trailing-slash pattern only matches the slashed
+    form, which is the form git uses when walking a tree.
+    """
+    repo.write("vendor/thing.c", "x\n")
+    repo.write(".gitattributes", "vendor/ slashpat\nvendor barepat\n")
+    repo.commit()
+
+    assert "slashpat: set" in repo.git("check-attr", "--all", "vendor/")
+    assert "slashpat" not in repo.git("check-attr", "--all", "vendor")
+    assert "barepat: set" in repo.git("check-attr", "--all", "vendor")
+
+
+def test_builtin_binary_macro_expands_and_sets_itself(repo):
+    """The claim behind macro expansion, which the self-check forced."""
+    repo.write("x.png", "x\n")
+    repo.write(".gitattributes", "* text=auto\n*.png binary\n")
+    repo.commit()
+
+    out = repo.git("check-attr", "--all", "x.png")
+    assert "binary: set" in out
+    assert "text: unset" in out, "binary stopped expanding to -text"
+    assert "diff: unset" in out and "merge: unset" in out
+
+
+def test_negated_macro_does_not_expand(repo):
+    repo.write("x.r", "x\n")
+    repo.write(".gitattributes", "* text=auto\n*.r -binary\n")
+    repo.commit()
+
+    out = repo.git("check-attr", "--all", "x.r")
+    assert "binary: unset" in out
+    assert "text: auto" in out, "-binary expanded, which it should not"
+
+
+def test_macro_may_be_used_before_it_is_defined(repo):
+    repo.write("x.s", "x\n")
+    repo.write(".gitattributes", "*.s mym\n[attr]mym text -diff\n")
+    repo.commit()
+
+    out = repo.git("check-attr", "--all", "x.s")
+    assert "text: set" in out and "diff: unset" in out
 
 
 def test_adding_text_attribute_does_not_renormalize_history(repo):
