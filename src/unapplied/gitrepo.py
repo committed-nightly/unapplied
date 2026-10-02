@@ -15,18 +15,41 @@ class NotARepository(Exception):
     pass
 
 
+class BadPath(Exception):
+    """The path given is not a directory this tool can look in."""
+
+
 class GitFailed(Exception):
     pass
 
 
+class GitNotRun(GitFailed):
+    """git never started: no git on PATH, or its working directory went away.
+
+    A subclass of GitFailed so that every caller already handling a failed
+    git command handles this too -- but a distinct type, because it must not
+    be mistaken for git answering "this is not a repository".
+    """
+
+
 def _run(args: list[str], cwd: Path, check: bool = True) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        errors="replace",
-    )
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+    except OSError as exc:
+        # subprocess raises out of _execute_child, before git runs at all, when
+        # the executable is missing or `cwd` is not an enterable directory.
+        # CPython puts the offending path in .filename, which is the only way
+        # to tell those two apart; the generic message covers it if that ever
+        # stops being true.
+        if isinstance(exc, FileNotFoundError) and exc.filename == "git":
+            raise GitNotRun("git is not installed, or not on PATH") from exc
+        raise GitNotRun(f"could not run git in {cwd}: {exc.strerror}") from exc
     if check and proc.returncode != 0:
         raise GitFailed(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -45,8 +68,18 @@ class EolRecord:
 class Repo:
     def __init__(self, path: Path) -> None:
         self.path = path
+        # Checked before git is invoked. git is given this path as a working
+        # directory, and a working directory that does not exist is not a
+        # question git ever gets asked -- the process fails to start instead.
+        if not path.exists():
+            raise BadPath(f"{path}: no such file or directory")
+        if not path.is_dir():
+            raise BadPath(f"{path}: not a directory")
         try:
             top = _run(["rev-parse", "--show-toplevel"], path).strip()
+        except GitNotRun:
+            # Not git's answer about the path. Say what actually happened.
+            raise
         except GitFailed as exc:
             raise NotARepository(f"{path} is not inside a git repository") from exc
         if not top:

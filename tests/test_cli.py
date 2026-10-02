@@ -51,6 +51,43 @@ def test_not_a_repository(tmp_path, run):
     assert "not inside a git repository" in err
 
 
+def test_path_that_does_not_exist(tmp_path, run):
+    """A missing path is the documented exit 2, not a traceback.
+
+    git never gets asked about it: the path is its working directory, and
+    subprocess fails to start the child before git is reached.
+    """
+    code, out, err = run(tmp_path / "nope")
+    assert code == EXIT_ERROR
+    assert err.startswith("unapplied: ")
+    assert "no such file or directory" in err
+    assert "Traceback" not in err
+    assert out == ""
+
+
+def test_path_that_is_a_file(repo, run):
+    """Same for a path that exists but is not a directory."""
+    target = repo.write("a.py", "x\n")
+
+    code, out, err = run(target)
+    assert code == EXIT_ERROR
+    assert err.startswith("unapplied: ")
+    assert "not a directory" in err
+    assert "Traceback" not in err
+    assert out == ""
+
+
+def test_no_git_on_path(repo, run, monkeypatch):
+    """The README asks for git on PATH, so say so when it is not there."""
+    repo.write(".gitattributes", "*.py text\n")
+    repo.commit()
+    monkeypatch.setenv("PATH", str(repo.path / "no-bin-here"))
+
+    code, _, err = run(repo.path)
+    assert code == EXIT_ERROR
+    assert "git is not installed, or not on PATH" in err
+
+
 def test_only_filters_to_one_check(repo, run):
     repo.write("a.py", "x\n")
     repo.write(".gitattributes", "*.rb diff=nosuchdriver\n")

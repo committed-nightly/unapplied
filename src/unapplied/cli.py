@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import attrfile, checks, report
-from .gitrepo import GitFailed, NotARepository, Repo
+from .gitrepo import BadPath, GitFailed, NotARepository, Repo
 from .match import ProbeFailed, resolve_matches
 
 EXIT_CLEAN = 0
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         repo = Repo(Path(args.path).resolve())
-    except NotARepository as exc:
+    except (BadPath, NotARepository, GitFailed) as exc:
         print(f"unapplied: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
