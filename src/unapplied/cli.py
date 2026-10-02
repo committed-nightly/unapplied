@@ -49,10 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class BadUsage(Exception):
+    """Arguments that parse but name something that does not exist."""
+
+
 def _enabled(only: list[str], skip: list[str]) -> set[str]:
     unknown = [c for c in (*only, *skip) if c not in checks.ALL_CHECKS]
     if unknown:
-        raise SystemExit(
+        raise BadUsage(
             f"unapplied: no such check: {', '.join(unknown)}\n"
             f"           known checks: {', '.join(checks.ALL_CHECKS)}"
         )
@@ -68,7 +72,13 @@ def main(argv: list[str] | None = None) -> int:
             print(check)
         return EXIT_CLEAN
 
-    enabled = _enabled(args.only, args.skip)
+    # Raised SystemExit with a message before, which argparse-style looks fine
+    # and exits 1 -- the code the README reserves for findings.
+    try:
+        enabled = _enabled(args.only, args.skip)
+    except BadUsage as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_ERROR
 
     try:
         repo = Repo(Path(args.path).resolve())

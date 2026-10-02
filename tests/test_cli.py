@@ -6,8 +6,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from unapplied.cli import EXIT_CLEAN, EXIT_ERROR, EXIT_FINDINGS, main
 
 
@@ -121,13 +119,17 @@ def test_skipping_everything_exits_clean(repo, run):
     assert code == EXIT_CLEAN
 
 
-def test_unknown_check_name_is_rejected(repo):
+def test_unknown_check_name_is_rejected(repo, run):
+    """Exit 2, not 1. The old version raised SystemExit with a message, which
+    exits 1 -- indistinguishable from the exit code for having findings."""
     repo.write("a.py", "x\n")
     repo.commit()
 
-    with pytest.raises(SystemExit) as excinfo:
-        main([str(repo.path), "--only", "nosuchcheck"])
-    assert "no such check" in str(excinfo.value)
+    code, out, err = run(repo.path, "--only", "nosuchcheck")
+    assert code == EXIT_ERROR
+    assert "no such check: nosuchcheck" in err
+    assert "known checks:" in err
+    assert out == ""
 
 
 def test_json_output(repo, run):
