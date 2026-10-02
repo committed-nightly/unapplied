@@ -1,0 +1,92 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: pip install -e ".[dev]"
+
+      - run: git --version
+      - run: python -m pytest
+
+  dogfood:
+    # Run it on real repositories. A tool that has only ever been run by its
+    # own test suite is a tool nobody has run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+
+      - name: on itself, which should be clean
+        run: unapplied .
+
+      - name: on a repository with a known unapplied rule
+        # Builds the mistake the tool exists for -- files committed first, the
+        # attributes file committed on its own afterwards -- and checks that
+        # both headline findings come out, since a tool that silently stops
+        # finding anything would otherwise pass this job.
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          git init -q -b main .
+          git config user.email ci@example.invalid
+          git config user.name CI
+          git config core.autocrlf false
+          printf 'a\r\nb\r\n' > windows.txt
+          printf 'real bytes, not a pointer\n' > asset.psd
+          git add -A && git commit -qm "files first"
+          printf '* text=auto\n*.psd filter=lfs -text\n*.nonesuch text\n' > .gitattributes
+          git add .gitattributes && git commit -qm "attributes after"
+
+          unapplied . && { echo "expected findings, got a clean exit"; exit 1; }
+          out=$(unapplied . || true)
+          echo "$out"
+          for check in unnormalized lfs-not-pointer never-matches; do
+            echo "$out" | grep -q "$check" || { echo "missing: $check"; exit 1; }
+          done
+
+      - name: the unnormalized finding matches what git itself restages
+        # The claim is "git add --renormalize would change these files". So
+        # ask git. Checked against a real repository rather than a fixture,
+        # because the interesting cases only turn up in history.
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 https://github.com/microsoft/vscode /tmp/vscode
+          cd /tmp/vscode
+          unapplied . --only unnormalized --json > /tmp/out.json || true
+          python3 - <<'PY' > /tmp/reported
+          import json
+          d = json.load(open("/tmp/out.json"))
+          for f in d["findings"]:
+              for line in f["detail"]:
+                  print(line.rsplit(" (", 1)[0])
+          PY
+          git add --renormalize . >/dev/null
+          git diff --cached --name-only | sort > /tmp/actual
+          sort /tmp/reported > /tmp/reported.sorted
+          diff /tmp/reported.sorted /tmp/actual || {
+            echo "unapplied and git disagree about which files need renormalising"
+            exit 1
+          }
+          echo "$(wc -l < /tmp/actual) file(s), matching git exactly"
