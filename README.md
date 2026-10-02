@@ -43,9 +43,9 @@ $ cat .gitattributes
 * text=auto
 *.psd filter=lfs -text
 
-$ git status --porcelain          # clean
 $ git check-attr --all windows.txt
 windows.txt: text: auto           # git agrees the rule is in force
+$ git status --porcelain          # says nothing about windows.txt or mixed.txt
 
 $ unapplied .
 .gitattributes:1: unnormalized: 2 file(s) this rule covers are still stored with CRLF in the index -- the rule was added after they were committed and `git add --renormalize .` was never run
@@ -57,6 +57,15 @@ $ unapplied .
 
 The second one is the expensive mistake: everything reports LFS as configured,
 and the fat blob is in your history anyway.
+
+What `git status` prints for `asset.psd` depends on the machine, which is why
+the example above only claims the CRLF half. With git-lfs installed and
+`filter.lfs.clean` configured — likely, if you are the sort of person who
+reaches for this — `git status` applies the clean filter to the worktree file,
+gets a pointer, compares it to the fat blob in the index and reports
+` M asset.psd`. Without git-lfs it is silent and the status is fully clean.
+Neither answer tells you LFS never took the file: one says nothing, and the
+other says you have an uncommitted change to a file you have not touched.
 
 ## The checks
 
